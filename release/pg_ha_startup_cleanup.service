@@ -1,0 +1,12 @@
+[Unit]
+Description=Clean up PostgreSQL High Availability Controller locks
+Before=crond.service
+After=network.target
+
+[Service]
+Type=oneshot
+ExecStart=/etc/ha_controller/pg_ha_startup_cleanup.sh
+RemainAfterExit=true
+
+[Install]
+WantedBy=multi-user.target

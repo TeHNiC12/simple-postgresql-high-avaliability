@@ -1,0 +1,17 @@
+[Unit]
+Description=A lightweight voter for Simple PostgreSQL High Avaliability
+Wants=network-online.target
+After=network-online.target
+StartLimitIntervalSec=3600
+StartLimitBurst=2
+
+[Service]
+Type=simple
+ExecStart=/etc/ha-controller/postgresql_ha_controller.sh
+KillMode=process
+TimeoutStopSec=5
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
