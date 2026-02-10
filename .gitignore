@@ -2,3 +2,5 @@ ha_demo/id_rsa*
 ha_demo
 source/debug
 legacy
+~*.docx
+*.drawio.bkp

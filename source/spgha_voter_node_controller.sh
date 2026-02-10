@@ -1,42 +1,20 @@
 #!/bin/bash
 set +m
+set -o pipefail
 
 #=================================SETTINGS=================================#
 #---------------------------Files & Directories----------------------------#
 # script directories
 LOGFILE_PATH="/etc/ha-controller/failover.log"
 LOCK_FILE_DIR="/etc/ha-controller/locks"
-KEEPALIVED_DIR="/etc/keepalived"
-PG_LOG_ARCIVE_DIR="/etc/ha-controller/pg_log_archive"
-
-# PostgreSQL directories
-PGDATA="/pgpro-ent-16/pgdata"
-PGWAL="/pgpro-ent-16/pgwal"
-PGLOG="log"
-
-# PostgreSQL binaries
-PG_ISREADY="/opt/pgpro/ent-16/bin/pg_isready"
-PG_CTL="/opt/pgpro/ent-16/bin/pg_ctl"
-PSQL="/opt/pgpro/ent-16/bin/psql"
-PG_CONTROLDATA="/opt/pgpro/ent-16/bin/pg_controldata"
-PG_BASEBACKUP="/opt/pgpro/ent-16/bin/pg_basebackup"
-PG_REWIND="/opt/pgpro/ent-16/bin/pg_rewind"
-
-
 #-----------------------------------Users----------------------------------#
 SYSTEM_ADMIN_USER="root"
-SYSTEM_POSTGRES_USER="postgres"
-PG_ADMIN_USER="postgres"
-PG_REPLICATION_USER="replicator"
-
 #----------------------------Cluster information---------------------------#
 CLUSTER_NAME_LOCAL="pg_ha_voter"
 CLUSTER_NAME_NODE_1="pg_ha_1"
 CLUSTER_IP_NODE_1="10.7.2.92"
 CLUSTER_NAME_NODE_2="pg_ha_2"
 CLUSTER_IP_NODE_2="10.7.2.93"
-PGPORT="5432"
-
 #-----------------------------Retries & Timeouts---------------------------#
 # retries = 1 - disables retries
 # timeout = 0 - disables timeout
@@ -46,31 +24,7 @@ SSH_TCP_KEEPALIVE="yes"
 SSH_SERVER_ALIVE_INTERVAL=1
 SSH_SERVER_ALIVE_COUNT_MAX=1
 
-export PGCONNECT_TIMEOUT=1
-
-PG_STATUS_CHECK_RETRIES=3               
-PG_STATUS_CHECK_TIMEOUT=6
-
-PG_REPLCATION_CHECK_RETRY_DELAY=5
-PG_REPLICATION_CHECK_TIMEOUT=240
-
-PG_BASEBACKUP_RESTORE_TIMEOUT=120
-
-PG_START_TIMEOUT=120
-
-PG_STOP_TIMEOUT=120
-
-PG_REWIND_TIMEOUT=120
-
-STANDALONE_WAIT_TIMEOUT=60
-
-STATE_VERIFICATION_TIMEOUT=120       # timeout for retrieving remote's statuses for verification
-                                    # 0 - disables timeout
-STATE_VERIFICATION_RETRY_DELAY=5    # delay between state verification attempts
-
 RETRY_DELAY=3                       # time in seconds between command reties
-
-PG_BACKGROUND_CHECK_SLEEP=0.3
 #------------------------------Script behavior-----------------------------#
 LOG_LEVEL=5                         # 0 - Emergency 
                                     # 1 - Alert
@@ -92,25 +46,6 @@ JOURNAL_LOG_LEVEL=5                 # 0 - Emergency
                                     # 5 - Notice
                                     # 6 - Informational [INFO]
                                     # 7 - Debug [DEBUG]
-
-PG_LOG_ACHIVING=1                   # Saves logs of local PostgreSQL instance
-                                    # before destructive actions for later analysis
-                                    #  1 - enables
-                                    #  0 - disables
-
-PG_ALLOW_STANDALONE_MASTER=1        # Allows standalone master for faster recovery
-                                    # 1 - enables
-                                    # 0 - disables
-
-PG_USE_RECOVERY_CONF=0              # Changes if recovery.conf is used or if recuvery.signal / standby.signal is used
-                                    # 1 - use recovery.conf
-                                    # 0 - use .signal files
-
-PG_CATCHUP_TIMEOUT=20               # Determines for how long async replica is allowed to catch up before being recreated
-                                    # timeout is specified in minutes
-                                    # 0 - disables timeout
-
-PG_REPLICATION_SLOT_NAME="ha_reserved_slot"     # Sets a name for replication slot
 
 SYNC_FILE_SUPPORTED=0               # Determines if file should me specified when using sync if applicable
                                     # May not me avaliable on all systems
@@ -828,26 +763,6 @@ directory_remove() {
     log_message "Successfully removed directory $directory_path" "DEBUG"
     return 0
 }
-
-# Archives local PostgreSQL instances logs to a separate folder before destructive actions
-# Usage: archive_local_postgresql_logs
-# Returns:  0 - if PostgreSQL instances logs were archived successfylly
-#           1 - if failed to archive logs
-archive_local_postgresql_logs() {
-    if (( PG_LOG_ACHIVING == 0 )); then
-        return 0
-    fi
-
-    log_message "Archiving local PostgreSQL logs" "NOTICE"
-
-    if ! command_handler "tar -czvf $PG_LOG_ARCIVE_DIR/pg_logs_$(date +"%Y-%m-%d_%H:%M:%S_%3N").tar.gz -C $PGDATA/ $PGLOG/" "1" "0" "archiving logs" > /dev/null 2>&1; then
-        log_message "archive_local_postgresql_logs failed - unable to archive PostgreSQL log directory" "WARNING"
-        return 1
-    fi
-
-    log_message "Succesfully archived PostgreSQL log directory to:  $PG_LOG_ARCIVE_DIR/pg_logs_$(date +"%Y-%m-%d_%H:%M:%S_%3N").tar.gz" "NOTICE"
-    return 0
-}
 #==========================================================================#
 
 
@@ -898,7 +813,10 @@ exit_fatal() {
 # Locks script execution during active recovery actions, so the in case of script restarting it wouldn't retry to repair PostgreSQL again (incorrectly)
 # Usage: lock_script_active_action
 lock_script_active_action() {
-    if ! file_create "$LOCK_FILE_DIR" "active.lock"; then
+    local timestamp
+    timestamp=$(date +"%Y-%m-%d %H:%M:%S.%3N")
+    
+    if ! file_rewrite "$LOCK_FILE_DIR" "active.lock" "$timestamp"; then
         exit_fatal "failed_to_lock_script_local_execution_by_active_action.fatal" "Failed to lock local scipt execution (active action)"
     fi
 }
@@ -911,7 +829,10 @@ signal_to_remote() {
     local signal_name="$1"
     local remote_host_ip="$2"
 
-    if ! file_create_remote "$LOCK_FILE_DIR" "$signal_name" "$remote_host_ip"; then
+    local timestamp
+    timestamp=$(remote_command_handler "date +\"%Y-%m-%d %H:%M:%S.%3N\"" "1" "0" "getting timestamp" "$SYSTEM_ADMIN_USER" "$remote_host_ip" "1")
+    
+    if ! file_rewrite_remote "$LOCK_FILE_DIR" "$signal_name" "$timestamp" "$remote_host_ip"; then
         exit_fatal "failed_to_signal_to_remote.fatal" "Failed to send $signal_name signal to $remote_host_ip"
     fi
 }
@@ -922,7 +843,10 @@ signal_to_remote() {
 lock_script_custom() {
     local lock_name="$1"
 
-    if ! file_create "$LOCK_FILE_DIR" "$lock_name"; then
+    local timestamp
+    timestamp=$(date +"%Y-%m-%d %H:%M:%S.%3N")
+
+    if ! file_rewrite "$LOCK_FILE_DIR" "$lock_name" "$timestamp"; then
         exit_fatal "failed_to_lock_script_local_execution_by_$lock_name.fatal" "Failed to lock local scipt execution ($lock_name)"
     fi
 }
@@ -1025,168 +949,6 @@ unlock_script_by_signal() {
     if ! file_remove "$LOCK_FILE_DIR" "$lock_name.unlock"; then
         exit_fatal "failed_to_remove_unlock_signal.fatal" "Failed to remove $lock_name.unlock"
     fi
-
-    unlock_local_script_execution
-    return 0
-}
-
-# A set of actions to handle rewind.signal
-# Exits on fatal error
-react_to_rewind_signal() {
-    lock_script_active_action
-
-    log_message "rewind.signal found, starting in master reattaching mode" "NOTICE"
-
-    log_message "Blocking keepalived VIP" "NOTICE"
-    if ! file_create "$KEEPALIVED_DIR" "no_vip.block"; then
-        exit_fatal "failed_to_block_vip.fatal" "Failed to block keepalived VIP"
-    fi
-
-    if ! reattach_master_as_replica; then
-        log_message "Removing rewind.signal" "NOTICE"
-        unlock_script_custom "rewind.signal"
-
-        log_message "Unlocking local script execution (master down)" "NOTICE"
-        unlock_script_custom "master_down.lock"
-
-        log_message "Unblocking keepalived VIP" "NOTICE"
-        unlock_script_custom "no_vip.block"
-
-        exit_fatal "failed_to_reattach_old_master_as_replica.fatal" "Failed to reattach old master as replica"
-    fi
-
-    log_message "Removing rewind.signal" "NOTICE"
-    unlock_script_custom "rewind.signal"
-
-    log_message "Unlocking local script execution (master down)" "NOTICE"
-    unlock_script_custom "master_down.lock"
-
-    log_message "Unblocking keepalived VIP" "NOTICE"
-    if ! file_remove "$KEEPALIVED_DIR" "no_vip.block"; then
-        exit_fatal "failed_to_unblock_keepalived_vip" "Failed to remove block from keepalived VIP"
-    fi
-
-    log_message "Successfully reattached old master as a replica, system restored" "SUCCESS"
-
-    unlock_local_script_execution
-    return 0
-}
-
-# A set of actions to handle rewind.signal
-# Exits on fatal error
-react_to_restart_replica_signal() {
-    lock_script_active_action
-
-    log_message "restart_replica.signal found, starting in old replica restarting mode" "NOTICE"
-
-    if ! local_postgresql_control "start" "replica"; then
-        log_message "Removing restart_replica.signal" "NOTICE"
-        unlock_script_custom "restart_replica.signal"
-
-        exit_fatal "failed_to_restart_old_replica.fatal" "Failed to restart old replica"
-    fi
-
-    log_message "Removing restart_replica.signal" "NOTICE"
-    unlock_script_custom "restart_replica.signal"
-
-    if ! block_state_negotiation; then
-        exit_fatal "failed_to_block_state_negotiation.fatal" "Failed to block state negotiation"
-    fi
-
-    log_message "Successfully restarted old replica, awaiting replica promotion" "WARNING"
-
-    unlock_local_script_execution
-    return 0
-}
-
-# A set of actions to handle rewind.signal
-# Exits on fatal error
-react_to_prepare_transition_signal() {
-    lock_script_active_action
-
-    log_message "prepare_transition.signal found, preparing async replica to trasition to synchronous" "NOTICE"
-
-    if ! prepare_replica_for_sync_transition; then
-        log_message "Failed to prepare async replica to trasition to synchronous" "WARNING"
-    fi
-
-    log_message "Removing prepare_transition.signal" "NOTICE"
-    unlock_script_custom "prepare_transition.signal"
-
-    log_message "Successfully prepared async replica to trasition to synchronous" "NOTICE"
-
-    unlock_local_script_execution
-    return 0
-}
-
-# A set of actions to handle rewind.signal
-# Exits on fatal error
-react_to_restore_catchup_signal() {
-    lock_script_active_action
-
-    log_message "restore_catchup.signal found, restoring replica to catch up to master" "NOTICE"
-
-    if ! restore_as_replcia_to_catch_up; then
-        
-
-        log_message "Removing restore_catchup.signal" "NOTICE"
-        unlock_script_custom "restore_catchup.signal"
-
-        exit_fatal "failed_to_restore_catch_up_replica.fatal" "Failed to restore replica to catch up to master"
-    fi
-
-    log_message "Removing restore_catchup.signal" "NOTICE"
-    unlock_script_custom "restore_catchup.signal"
-
-    log_message "Successfully restored replica to catch up to master" "NOTICE"
-
-    unlock_local_script_execution
-    return 0
-}
-
-# A set of actions to handle rewind.signal
-# Exits on fatal error
-react_to_clean_replicatino_start_signal() {
-    lock_script_active_action
-
-    log_message "clean_replication_start.signal found, cleaning local starting time of synchronous replication" "NOTICE"
-
-    if ! clean_async_replication_start; then
-        log_message "Removing clean_replication_start.signal" "NOTICE"
-        unlock_script_custom "clean_replication_start.signal"
-
-        exit_fatal "failed_to_clean_async_start_time.fatal" "Failed to clean local starting time of synchronous replication"
-    fi
-
-    log_message "Removing clean_replication_start.signal" "NOTICE"
-    unlock_script_custom "clean_replication_start.signal"
-
-    log_message "Successfully cleaned local starting time of asynchronous replication" "SUCCESS"
-
-    unlock_local_script_execution
-    return 0
-}
-
-# A set of actions to handle rewind.signal
-# Exits on fatal error
-react_to_use_replication_slot_signal() {
-    lock_script_active_action
-
-    log_message "use_replication_slot.signal found, reconfiguring replica to use replication slot" "NOTICE"
-
-    if ! reconfigure_replica_for_slot_use; then
-        
-
-        log_message "Removing use_replication_slot.signal" "NOTICE"
-        unlock_script_custom "use_replication_slot.signal"
-
-        exit_fatal "replica_failed_to_use_replication_slot.fatal" "Failed to reconfigure replica to use replication slot"
-    fi
-
-    log_message "Removing use_replication_slot.signal" "NOTICE"
-    unlock_script_custom "use_replication_slot.signal"
-
-    log_message "Successfully reconfigured replica to use replication slot" "NOTICE"
 
     unlock_local_script_execution
     return 0

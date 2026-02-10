@@ -1,5 +1,6 @@
 #!/bin/bash
 set +m
+set -o pipefail
 
 #=================================SETTINGS=================================#
 #---------------------------Files & Directories----------------------------#
@@ -71,7 +72,9 @@ RETRY_DELAY=3                       # time in seconds between command reties
 
 PG_BACKGROUND_CHECK_SLEEP=0.3
 
-VOTE_TIMEOUT=10 
+VOTE_TIMEOUT=10
+
+SSH_LOST_RECHECK_DELAY=10
 #------------------------------Script behavior-----------------------------#
 LOG_LEVEL=5                         # 0 - Emergency 
                                     # 1 - Alert
@@ -218,8 +221,8 @@ dump_current_log(){
 # Execution handler for cmd utilities: supports retries, timeouts and error logging
 # Usage: command_handler <command> <No. of retries> <timeout> <short decription for command> <disable logging (optional)>
 #   $1: command to execute
-#   $2: nomber of retries
-#   $3: timeout for the command
+#   $2: number of retries
+#   $3: timeout for the command (0 disables)
 #   $4: short message to display in logs
 #   $5: 1 disables logging (an optional argument)
 # Returns:  0 - if command executed successfully
@@ -318,8 +321,8 @@ command_handler() {
 # Remote execution handler for cmd utilities: supports retries, timeouts and error logging
 # Usage: command_handler <command> <No. of retries> <timeout> <short decription for command> <remote host user> <remote host ip> <disable logging (optional)>
 #   $1: command to execute
-#   $2: nomber of retries
-#   $3: timeout for the command
+#   $2: number of retries
+#   $3: timeout for the command (0 disables)
 #   $4: short message to display in logs
 #   $5: remote system's user
 #   $6: remote system's ip
@@ -864,6 +867,34 @@ on_stop_cleanup() {
         kill -s SIGTERM "$pid" > /dev/null 2>&1
     done
     
+    return 0
+}
+
+# Checks if the system has been restarted and 
+# Usage: detect_restart
+# Returns:  0 - if potential restart was handled successfully
+#           1 - if handling failed
+detect_restart() {
+    local current_boot_uuid
+    current_boot_uuid=$(cat /proc/sys/kernel/random/boot_id)
+
+    local previous_boot_uuid
+    if [[ -e "$LOCK_FILE_DIR"/boot.uuid ]]; then
+        if ! (( "$current_boot_uuid" == "$previous_boot_uuid" )); then
+            log_message "System has been rebooted" "NOTICE"
+
+            if ! file_create "$LOCK_FILE_DIR" "system.restarted"; then
+                log_message "Failed to save restarted signal" "ERROR"
+                return 1
+            fi
+        fi
+    fi
+
+    if ! file_rewrite "$LOCK_FILE_DIR" "boot.uuid" "$current_boot_uuid"; then
+        log_message "Failed to save new boot uuid" "ERROR"
+        return 1
+    fi
+
     return 0
 }
 #==========================================================================#
@@ -2197,7 +2228,10 @@ exit_fatal() {
 # Locks script execution during active recovery actions, so the in case of script restarting it wouldn't retry to repair PostgreSQL again (incorrectly)
 # Usage: lock_script_active_action
 lock_script_active_action() {
-    if ! file_create "$LOCK_FILE_DIR" "active.lock"; then
+    local timestamp
+    timestamp=$(date +"%Y-%m-%d %H:%M:%S.%3N")
+    
+    if ! file_rewrite "$LOCK_FILE_DIR" "active.lock" "$timestamp"; then
         exit_fatal "failed_to_lock_script_local_execution_by_active_action.fatal" "Failed to lock local scipt execution (active action)"
     fi
 }
@@ -2210,7 +2244,10 @@ signal_to_remote() {
     local signal_name="$1"
     local remote_host_ip="$2"
 
-    if ! file_create_remote "$LOCK_FILE_DIR" "$signal_name" "$remote_host_ip"; then
+    local timestamp
+    timestamp=$(remote_command_handler "date +\"%Y-%m-%d %H:%M:%S.%3N\"" "1" "0" "getting timestamp" "$SYSTEM_ADMIN_USER" "$remote_host_ip" "1")
+    
+    if ! file_rewrite_remote "$LOCK_FILE_DIR" "$signal_name" "$timestamp" "$remote_host_ip"; then
         exit_fatal "failed_to_signal_to_remote.fatal" "Failed to send $signal_name signal to $remote_host_ip"
     fi
 }
@@ -2221,7 +2258,10 @@ signal_to_remote() {
 lock_script_custom() {
     local lock_name="$1"
 
-    if ! file_create "$LOCK_FILE_DIR" "$lock_name"; then
+    local timestamp
+    timestamp=$(date +"%Y-%m-%d %H:%M:%S.%3N")
+
+    if ! file_rewrite "$LOCK_FILE_DIR" "$lock_name" "$timestamp"; then
         exit_fatal "failed_to_lock_script_local_execution_by_$lock_name.fatal" "Failed to lock local scipt execution ($lock_name)"
     fi
 }
@@ -2646,7 +2686,6 @@ handle_ssh_remote_replica_down() {
         log_message "Signaling $SYSTEM_ADMIN_USER@$CLUSTER_NAME_REMOTE that master is ready for async replication" "NOTICE"
         signal_to_remote "master_async.signal" "$CLUSTER_IP_REMOTE"
 
-
         if ! master_replication_check "0"; then
             exit_fatal "asyncronous_replication_on_master_didnt_start.fatal" "Asynchronous replication failed to start"
         fi
@@ -2751,6 +2790,7 @@ handle_no_ssh() {
     lock_script_active_action
 
     if [[ -e "$LOCK_FILE_DIR"/ssh_interconnect.lost ]]; then
+        sleep $SSH_LOST_RECHECK_DELAY
         unlock_local_script_execution
         return 0
     fi
@@ -2883,6 +2923,12 @@ decision_maker() {
                 fi
             fi
 
+            if [[ -e "$LOCK_FILE_DIR"/system.restarted ]]; then
+                if ! file_remove "$LOCK_FILE_DIR" "system.restarted"; then
+                    exit_fatal "failed_to_remove_system_restart_signal.fatal" "Failed to remove system restarted signal"
+                fi
+            fi
+
             save_local_postgres_status "$local_postgres_status"
             
 
@@ -2949,6 +2995,18 @@ decision_maker() {
         else
             # at lest one node is down
 
+            check_previous_local_cluster_role
+            previous_local_postgres_role="$?"
+            if [[ "$previous_local_postgres_role" -eq 0 ]]; then
+                exit_fatal "no_previous_local_cluster_role.fatal" "Failed to retrieve previous local cluster role"
+            fi
+
+            if [[ -e "$LOCK_FILE_DIR"/system.restarted ]] && (( previous_local_postgres_role == 1)); then
+                if ! block_state_negotiation; then
+                    exit_fatal "failed_to_block_state_negotiation.fatal" "Failed to block state negotiation"
+                fi
+            fi
+
             if ! [[ -e "$LOCK_FILE_DIR"/state_negotiaton.block ]]; then
 
                 local negotiation_exit_code
@@ -3003,12 +3061,6 @@ decision_maker() {
                 if [[ "$remote_postgres_status" -eq 0 ]]; then
                     # both nodes are down
 
-                    check_previous_local_cluster_role
-                    previous_local_postgres_role="$?"
-                    if [[ "$previous_local_postgres_role" -eq 0 ]]; then
-                        exit_fatal "no_previous_local_cluster_role.fatal" "Failed to retrieve previous local cluster role"
-                    fi
-
                     if [[ "$previous_local_postgres_role" -eq 1 ]]; then
                         # both nodes down, local node was master (action needed)
                         handle_ssh_both_down_local_master
@@ -3022,12 +3074,6 @@ decision_maker() {
                     # local node is down
 
                     if [[ "$remote_postgres_status" -eq 1 ]]; then
-
-                        check_previous_local_cluster_role
-                        previous_local_postgres_role="$?"
-                        if [[ "$previous_local_postgres_role" -eq 0 ]]; then
-                            exit_fatal "no_previous_local_cluster_role.fatal" "Failed to retrieve previous local cluster role"
-                        fi
 
                         if [[ "$previous_local_postgres_role" -eq 2 ]]; then
                             # local replica is down (action needed)
@@ -3305,6 +3351,10 @@ check_locks_and_signals() {
 main() {
     #file_remove "$LOCK_FILE_DIR" "remote_pg.status"
     #file_remove "$LOCK_FILE_DIR" "status.expired"
+
+    if ! detect_restart; then
+        exit_fatal "failed_to_handle_system_restart.fatal" "Failed to handle system restart"
+    fi
 
     while true;
     do
