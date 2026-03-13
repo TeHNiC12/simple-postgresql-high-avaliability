@@ -8,7 +8,7 @@ set -o pipefail
 LOGFILE_PATH="/etc/ha-controller/failover.log"
 LOCK_FILE_DIR="/etc/ha-controller/locks"
 KEEPALIVED_DIR="/etc/keepalived"
-PG_LOG_ARCIVE_DIR="/etc/ha-controller/pg_log_archive"
+PG_LOG_ARCHIVE_DIR="/etc/ha-controller/pg_log_archive"
 
 # PostgreSQL directories
 PGDATA="/pgpro-ent-16/pgdata"
@@ -48,7 +48,7 @@ SSH_SERVER_ALIVE_COUNT_MAX=1
 
 export PGCONNECT_TIMEOUT=1
 
-PG_STATUS_CHECK_RETRIES=3               
+PG_STATUS_CHECK_RETRIES=3
 PG_STATUS_CHECK_TIMEOUT=6
 
 PG_REPLCATION_CHECK_RETRY_DELAY=5
@@ -64,7 +64,7 @@ PG_REWIND_TIMEOUT=120
 
 STANDALONE_WAIT_TIMEOUT=60
 
-STATE_VERIFICATION_TIMEOUT=120       # timeout for retrieving remote's statuses for verification
+STATE_VERIFICATION_TIMEOUT=120      # timeout for retrieving remote's statuses for verification
                                     # 0 - disables timeout
 STATE_VERIFICATION_RETRY_DELAY=5    # delay between state verification attempts
 
@@ -106,7 +106,7 @@ PG_ALLOW_STANDALONE_MASTER=1        # Allows standalone master for faster recove
                                     # 1 - enables
                                     # 0 - disables
 
-PG_USE_RECOVERY_CONF=0              # Changes if recovery.conf is used or if recuvery.signal / standby.signal is used
+PG_USE_RECOVERY_CONF=0              # Changes if recovery.conf is used or if recovery.signal / standby.signal is used
                                     # 1 - use recovery.conf
                                     # 0 - use .signal files
 
@@ -846,12 +846,12 @@ archive_local_postgresql_logs() {
 
     log_message "Archiving local PostgreSQL logs" "NOTICE"
 
-    if ! command_handler "tar -czvf $PG_LOG_ARCIVE_DIR/pg_logs_$(date +"%Y-%m-%d_%H:%M:%S_%3N").tar.gz -C $PGDATA/ $PGLOG/" "1" "0" "archiving logs" > /dev/null 2>&1; then
+    if ! command_handler "tar -czvf $PG_LOG_ARCHIVE_DIR/pg_logs_$(date +"%Y-%m-%d_%H:%M:%S_%3N").tar.gz -C $PGDATA/ $PGLOG/" "1" "0" "archiving logs" > /dev/null 2>&1; then
         log_message "archive_local_postgresql_logs failed - unable to archive PostgreSQL log directory" "WARNING"
         return 1
     fi
 
-    log_message "Succesfully archived PostgreSQL log directory to:  $PG_LOG_ARCIVE_DIR/pg_logs_$(date +"%Y-%m-%d_%H:%M:%S_%3N").tar.gz" "NOTICE"
+    log_message "Succesfully archived PostgreSQL log directory to:  $PG_LOG_ARCHIVE_DIR/pg_logs_$(date +"%Y-%m-%d_%H:%M:%S_%3N").tar.gz" "NOTICE"
     return 0
 }
 #==========================================================================#
@@ -2430,7 +2430,7 @@ clean_shared_state() {
             fi
         fi
 
-         sleep "$STATE_VERIFICATION_RETRY_DELAY"
+        sleep "$STATE_VERIFICATION_RETRY_DELAY"
     done
 
     if file_remove "$LOCK_FILE_DIR" "remote_pg.status" && file_remove "$LOCK_FILE_DIR" "status.expired"; then

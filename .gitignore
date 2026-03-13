@@ -4,3 +4,4 @@ source/debug
 legacy
 ~*.docx
 *.drawio.bkp
+.markdownlint.json
