@@ -1,73 +1,93 @@
 # simple-postgresql-high-avaliability
 
-## Обзор решения
+## Обзор
 
 SPGHA представляет собой набор bash скриптов для поддержания репликационной пары PostgreSQL в рабочем состоянии.
 Вместе со скриптами предполагается использование Keepalived для предоставления доступа к мастер-инстансу Postgres по VIP.
 
-## Сценарии работы
+## Установка
 
-### Репликационная пара
-
-Когда решение развернуто на 2-х узлах
-
-### Репликационная пара PostgreSQL + голосующий узел
-
-## Установка решения
+SPGHA поставляется в качестве набора bash скриптов и предполагает ручную установку. Также скрипт опирается на Keepalived для предоставления единой точки входа в кластер, примеры конфигурации 
 
 ### Подготока системы
 
-#### Подготовка рабочей директории и файлов скрипта
+1. **Добавление директорий для работы скрипта**
 
-### Добавление systemd сервисов
+    На всез узлах SPGHA в рабочей директории скрипта должна присутстваовать директория для системы сигналов и блокировок. На узлах-контроллерах также можно добавить директорию для архивирования логов СУБД.
+    В рабочие директории разместите скрипты `pgha-controller.sh` или `pgha-voter.sh` в зависимости от роли узла.
+    Для рабочей директории и ее содержимого установите владельца **root:root** с правами **700**.
+    Пример структуры раобочего директорий скрипта:
 
-Запуск скриптов осуществляется через systemd по
+    ```txt
+    На контроллере:
+    spgha
+    ├── pgha-controller.sh
+    │
+    ├── locks
+    │   └── ...
+    │   
+    └── [pg_log_archive]
+        └── ...
+    ```
 
-На узлах с **полновесным** контроллером spgha добавьте systemd сервис:
-`vim /lib/systemd/system/spgha_active_node_controller.service`
+    ```txt
+    На голосующем узле:
+    spgha
+    ├── pgha-voter.sh
+    │
+    └── locks
+        └── ...
+    ```
 
-```bash
-[Unit]
-Description=Manages high avaliability for PostgreSQL replication pair
-Wants=network-online.target
-After=network-online.target
-StartLimitIntervalSec=3600
-StartLimitBurst=2
+1. **Добавление systemd сервисов**
 
-[Service]
-Type=simple
-ExecStart=<путь до скрипта spgha>
-KillMode=process
-TimeoutStopSec=5
-Restart=on-failure
-RestartSec=5
+    Запуск скриптов осуществляется через systemd по
 
-[Install]
-WantedBy=multi-user.target
-```
+    На узлах с **полновесным** контроллером spgha добавьте systemd сервис:
+    `vim /lib/systemd/system/spgha_active_node_controller.service`
 
-На узлах с **голосующим** контроллером spgha добавьте systemd сервис:
-`vim /lib/systemd/system/spgha_voter_node_controller.service`
+    ```conf
+    [Unit]
+    Description=Manages high avaliability for PostgreSQL replication pair
+    Wants=network-online.target
+    After=network-online.target
+    StartLimitIntervalSec=3600
+    StartLimitBurst=2
 
-```bash
-[Unit]
-Description=A lightweight voter for Simple PostgreSQL High Avaliability
-Wants=network-online.target
-After=network-online.target
-StartLimitIntervalSec=3600
-StartLimitBurst=2
+    [Service]
+    Type=simple
+    ExecStart=<путь до скрипта spgha>
+    KillMode=process
+    TimeoutStopSec=5
+    Restart=on-failure
+    RestartSec=5
 
-[Service]
-Type=simple
-ExecStart=<путь до скрипта spgha>
-KillMode=process
-TimeoutStopSec=5
-Restart=on-failure
-RestartSec=5
+    [Install]
+    WantedBy=multi-user.target
+    ```
 
-[Install]
-WantedBy=multi-user.target
-```
+    На узлах с **голосующим** контроллером spgha добавьте systemd сервис:
+    `vim /lib/systemd/system/spgha_voter_node_controller.service`
+
+    ```conf
+    [Unit]
+    Description=A lightweight voter for Simple PostgreSQL High Avaliability
+    Wants=network-online.target
+    After=network-online.target
+    StartLimitIntervalSec=3600
+    StartLimitBurst=2
+
+    [Service]
+    Type=simple
+    ExecStart=<путь до скрипта spgha>
+    KillMode=process
+    TimeoutStopSec=5
+    Restart=on-failure
+    RestartSec=5
+
+    [Install]
+    WantedBy=multi-user.target
+    ```
 
 После добавления новых сервисов перечитайте конфигурацию systemd
 `systemctl daemon-reload`
@@ -107,11 +127,23 @@ fi
 
 ### Конфигурация скриптов для работы с голосующим узлом
 
+## Сценарии работы
+
+### Репликационная пара PostgreSQL sync-only
+
+Вариант работы скрипта, на 2-х узнал параллельно PostgreSQL в режиме высокой надежности.
+
+### Репликационная пара PostgreSQL standalo
+
+Вариант работы скрипта, на 2-х узнал параллельно PostgreSQL.
+
+### Репликационная пара PostgreSQL + голосующий узел
+
 ## Параметры конифгурации
 
 > Все параметры должны быть указаны перед запуском скрипта
 
-### Параметры конфигурации активного узла
+### Конфигурационные параметры активного узла
 
 | Параметр | Описание |
 | --- | --- |
@@ -175,7 +207,7 @@ fi
 | SYNC_FILE_SUPPORTED | Определяет будет ли указываться имя файла при использовании команды **sync**. <br> Функаионал синхронизации кеша ФС для конкретного файла поддерживается не на всех ОС. <br> &emsp; 0 - синхронизирует кеш всей ФС <br> &emsp; 1 - синхронизирует кеш для конкретного файла <br> Реализовано в целях разработки и не рекомендуется к изменению. |
 | USE_VOTER_NODE | Определяет будет ли использоваться голосующий узел для принятия кворумных решений при разрыве сетевого соединения между узлами postgres. Таким образом при разрыве сетевого соединения и отказе узла-мастера досупность сохранится путем продвижения реплики до нового мастера. <br> &emsp; 0 - не использовать голосующий узел <br> &emsp; 1 - использовать голосующий узел <br> Опция актуальна, когда местер-инстансу СУБД разрешено переходить в самостоятельный режим работы. |
 
-### Параметры конфигурации голосующего узла
+### Конфигурационные параметры голосующего узла
 
 | Параметр | Описание |
 | --- | --- |
